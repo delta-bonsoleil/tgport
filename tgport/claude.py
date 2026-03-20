@@ -104,6 +104,7 @@ async def stream_claude(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + config.RESPONSE_TIMEOUT
     stderr_output = ""
+    got_result = False
 
     try:
         assert process.stdout
@@ -120,6 +121,8 @@ async def stream_claude(
                 data = json.loads(line)
                 event = _parse_event(data)
                 if event:
+                    if isinstance(event, Result):
+                        got_result = True
                     yield event
             except json.JSONDecodeError:
                 logger.debug("Non-JSON output from claude: %s", line[:200])
@@ -131,13 +134,19 @@ async def stream_claude(
 
     finally:
         try:
-            await asyncio.wait_for(process.wait(), timeout=10)
+            await asyncio.wait_for(process.wait(), timeout=30)
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
 
         if process.stderr:
             stderr_output = (await process.stderr.read()).decode().strip()
+
+        # Don't raise if we already got a result from stdout
+        if got_result:
+            if process.returncode and process.returncode != 0:
+                logger.debug("Claude CLI exited with code %d after result (ignored)", process.returncode)
+            return
 
         if process.returncode and process.returncode != 0:
             if stderr_output:
