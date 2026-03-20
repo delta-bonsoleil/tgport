@@ -1,0 +1,12 @@
+[project]
+name = "tgport"
+version = "0.1.0"
+description = "Telegram bot wrapper for Claude CLI"
+requires-python = ">=3.11"
+dependencies = [
+    "python-telegram-bot>=21.0",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+tgport = "tgport.__main__:main"
