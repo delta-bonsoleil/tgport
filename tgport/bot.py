@@ -244,6 +244,7 @@ def run():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         level=logging.INFO,
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     app = Application.builder().token(config.BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
