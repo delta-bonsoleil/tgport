@@ -11,7 +11,7 @@ class SessionManager:
         """Returns (session_uuid, is_new)."""
         if chat_id in self._sessions:
             return self._sessions[chat_id], False
-        sid = uuid.uuid5(uuid.NAMESPACE_DNS, f"tgport.{chat_id}")
+        sid = uuid.uuid4()
         self._sessions[chat_id] = sid
         return sid, True
 

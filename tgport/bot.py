@@ -38,15 +38,10 @@ def restricted(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         if not user or user.id not in config.ALLOWED_USER_IDS:
+            logger.warning("Unauthorized access attempt from user %s", user.id if user else "unknown")
             return
         return await func(update, context)
     return wrapper
-
-
-def _escape_md(text: str) -> str:
-    """Minimal escaping for MarkdownV2 — wrap in pre block."""
-    # Using HTML is more reliable for arbitrary text
-    return text
 
 
 async def _edit_message(msg, text: str):
@@ -58,8 +53,8 @@ async def _edit_message(msg, text: str):
     except Exception:
         try:
             await msg.edit_text(text)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to edit message: %s", e)
 
 
 @restricted
@@ -154,6 +149,9 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
             await _process_message(update, chat_id, prompt, retry=True)
         else:
             await _edit_message(bot_msg, "Error: Failed to start Claude session.")
+    except RuntimeError as e:
+        logger.error("Claude CLI error: %s", e)
+        await _edit_message(bot_msg, f"Error: {e}")
 
 
 def run():

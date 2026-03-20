@@ -1,10 +1,13 @@
 import asyncio
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from collections.abc import AsyncGenerator
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 
 class SessionNotFoundError(Exception):
@@ -46,9 +49,10 @@ def _build_command(
         "-p",
         "--output-format", "stream-json",
         "--verbose",
-        "--dangerously-skip-permissions",
-        "--max-budget-usd", "1.0",
+        "--max-budget-usd", str(config.CLAUDE_MAX_BUDGET_USD),
     ]
+    if config.CLAUDE_SKIP_PERMISSIONS:
+        cmd.append("--dangerously-skip-permissions")
     if config.CLAUDE_MAX_TURNS:
         cmd += ["--max-turns", str(config.CLAUDE_MAX_TURNS)]
     if is_new_session:
@@ -95,13 +99,14 @@ async def stream_claude(
         cwd=config.CLAUDE_WORK_DIR,
     )
 
-    deadline = asyncio.get_event_loop().time() + config.RESPONSE_TIMEOUT
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + config.RESPONSE_TIMEOUT
     stderr_output = ""
 
     try:
         assert process.stdout
         async for raw_line in process.stdout:
-            if asyncio.get_event_loop().time() > deadline:
+            if loop.time() > deadline:
                 process.kill()
                 yield Error(message="Response timed out.")
                 return
@@ -115,6 +120,7 @@ async def stream_claude(
                 if event:
                     yield event
             except json.JSONDecodeError:
+                logger.debug("Non-JSON output from claude: %s", line[:200])
                 continue
 
     except Exception as e:
@@ -128,8 +134,14 @@ async def stream_claude(
             process.kill()
             await process.wait()
 
+        if process.stderr:
+            stderr_output = (await process.stderr.read()).decode().strip()
+
         if process.returncode and process.returncode != 0:
-            if process.stderr:
-                stderr_output = (await process.stderr.read()).decode().strip()
+            if stderr_output:
+                logger.error("Claude CLI exited with code %d: %s", process.returncode, stderr_output[:500])
             if "session" in stderr_output.lower() or "resume" in stderr_output.lower():
                 raise SessionNotFoundError(stderr_output)
+            if not stderr_output:
+                stderr_output = f"Claude CLI exited with code {process.returncode}"
+            raise RuntimeError(stderr_output)
