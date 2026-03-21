@@ -30,6 +30,7 @@ class Result:
     cost_usd: float
     is_error: bool
     errors: list[str]
+    usage: dict | None = None
 
 
 @dataclass
@@ -86,7 +87,8 @@ def _parse_event(data: dict) -> StreamEvent | None:
         cost = data.get("total_cost_usd", 0.0)
         is_error = data.get("is_error", False)
         errors = data.get("errors", [])
-        return Result(text=result, cost_usd=cost, is_error=is_error, errors=errors)
+        usage = data.get("modelUsage")
+        return Result(text=result, cost_usd=cost, is_error=is_error, errors=errors, usage=usage)
 
     return None
 

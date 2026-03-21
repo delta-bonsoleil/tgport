@@ -381,7 +381,8 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
                 cost_usd = event.cost_usd
                 clean_response = re.sub(r"\n<i>\[.*?\]</i>", "", accumulated).strip()
                 _log_event(chat_id, "response",
-                           response=clean_response, cost_usd=cost_usd)
+                           response=clean_response, cost_usd=cost_usd,
+                           usage=event.usage)
                 footer = _format_footer(event.cost_usd)
                 final = (accumulated + footer).strip() if footer else accumulated.strip()
                 await _edit_message(bot_msg, final)
