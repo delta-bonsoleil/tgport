@@ -15,6 +15,10 @@ class SessionManager:
         self._sessions[chat_id] = sid
         return sid, True
 
+    def update(self, chat_id: int, session_id: str):
+        """Update session ID from CLI response."""
+        self._sessions[chat_id] = uuid.UUID(session_id)
+
     def reset(self, chat_id: int) -> uuid.UUID:
         """Create a fresh session for this chat."""
         sid = uuid.uuid4()

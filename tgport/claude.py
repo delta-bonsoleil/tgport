@@ -31,6 +31,7 @@ class Result:
     is_error: bool
     errors: list[str]
     usage: dict | None = None
+    session_id: str | None = None
 
 
 @dataclass
@@ -88,7 +89,8 @@ def _parse_event(data: dict) -> StreamEvent | None:
         is_error = data.get("is_error", False)
         errors = data.get("errors", [])
         usage = data.get("modelUsage")
-        return Result(text=result, cost_usd=cost, is_error=is_error, errors=errors, usage=usage)
+        sid = data.get("session_id")
+        return Result(text=result, cost_usd=cost, is_error=is_error, errors=errors, usage=usage, session_id=sid)
 
     return None
 

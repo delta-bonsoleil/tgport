@@ -296,8 +296,8 @@ async def _send_typing(chat_id: int, bot, stop_event: asyncio.Event):
                 break
             except asyncio.TimeoutError:
                 pass
-    except Exception:
-        pass  # Don't let typing indicator errors affect message processing
+    except Exception as e:
+        logger.warning("Typing indicator error: %s", e)
 
 
 async def _process_message(update: Update, chat_id: int, prompt: str, retry: bool = False):
@@ -317,7 +317,9 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
     _log_event(chat_id, "request",
                user_id=user.id if user else 0,
                username=(user.username or user.full_name) if user else None,
-               prompt=prompt)
+               prompt=prompt,
+               session_id=str(session_id),
+               is_new=is_new)
 
     # Start typing indicator
     typing_stop = asyncio.Event()
@@ -379,10 +381,15 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
                     msg_count += 1
 
                 cost_usd = event.cost_usd
+                # Update session ID if CLI returned a different one
+                if event.session_id:
+                    session_manager.update(chat_id, event.session_id)
+
                 clean_response = re.sub(r"\n<i>\[.*?\]</i>", "", accumulated).strip()
                 _log_event(chat_id, "response",
                            response=clean_response, cost_usd=cost_usd,
-                           usage=event.usage)
+                           usage=event.usage,
+                           session_id=event.session_id)
                 footer = _format_footer(event.cost_usd)
                 final = (accumulated + footer).strip() if footer else accumulated.strip()
                 await _edit_message(bot_msg, final)
