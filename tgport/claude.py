@@ -33,6 +33,7 @@ class Result:
     errors: list[str]
     usage: dict | None = None
     session_id: str | None = None
+    subtype: str | None = None
 
 
 @dataclass
@@ -67,7 +68,7 @@ def _build_command(
         cmd += ["--session-id", str(session_id)]
     else:
         cmd += ["--resume", str(session_id)]
-    cmd.append(prompt)
+    cmd += ["--", prompt]
     return cmd
 
 
@@ -103,7 +104,8 @@ def _parse_event(data: dict) -> list[StreamEvent]:
         errors = data.get("errors", [])
         usage = data.get("modelUsage")
         sid = data.get("session_id")
-        events.append(Result(text=result, cost_usd=cost, is_error=is_error, errors=errors, usage=usage, session_id=sid))
+        subtype = data.get("subtype")
+        events.append(Result(text=result, cost_usd=cost, is_error=is_error, errors=errors, usage=usage, session_id=sid, subtype=subtype))
 
     return events
 
@@ -124,8 +126,15 @@ async def stream_claude(
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + config.RESPONSE_TIMEOUT
-    stderr_output = ""
+    stderr_chunks: list[str] = []
     got_result = False
+
+    async def _drain_stderr():
+        assert process.stderr
+        async for raw in process.stderr:
+            stderr_chunks.append(raw.decode())
+
+    stderr_task = asyncio.create_task(_drain_stderr())
 
     try:
         assert process.stdout
@@ -159,8 +168,8 @@ async def stream_claude(
             process.kill()
             await process.wait()
 
-        if process.stderr:
-            stderr_output = (await process.stderr.read()).decode().strip()
+        stderr_task.cancel()
+        stderr_output = "".join(stderr_chunks).strip()
 
         # Don't raise if we already got a result from stdout
         if got_result:

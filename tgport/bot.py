@@ -7,10 +7,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -364,32 +365,176 @@ async def _send_typing(chat_id: int, bot, stop_event: asyncio.Event):
         logger.warning("Typing indicator error: %s", e)
 
 
-async def _process_message(update: Update, chat_id: int, prompt: str, retry: bool = False):
-    session_id, is_new = session_manager.get_or_create(chat_id)
-    if retry:
-        is_new = True
+async def _process_message(update: Update, chat_id: int, prompt: str):
+    max_retries = 1
+    for attempt in range(max_retries + 1):
+        session_id, is_new = session_manager.get_or_create(chat_id)
+        if attempt > 0:
+            is_new = True
 
-    # Prepend user identity on first message of a session
-    if is_new:
+        # Prepend user identity on first message of a session
+        if is_new:
+            user = update.effective_user
+            if user:
+                name = user.full_name or user.username or str(user.id)
+                prompt = f"[User: {name}]\n{prompt}"
+
+        # Log request
         user = update.effective_user
-        if user:
-            name = user.full_name or user.username or str(user.id)
-            prompt = f"[User: {name}]\n{prompt}"
+        _log_event(chat_id, "request",
+                   user_id=user.id if user else 0,
+                   username=(user.username or user.full_name) if user else None,
+                   prompt=prompt,
+                   session_id=str(session_id),
+                   is_new=is_new)
 
-    # Log request
-    user = update.effective_user
+        # Start typing indicator
+        typing_stop = asyncio.Event()
+        typing_task = asyncio.create_task(_send_typing(chat_id, update.get_bot(), typing_stop))
+
+        bot_msg = await update.message.reply_text("...")
+        accumulated = ""
+        last_edit = 0.0
+        msg_count = 1
+        cost_usd: float | None = None
+        session_retry = False
+
+        try:
+            async for event in stream_claude(prompt, session_id, is_new):
+                if isinstance(event, TextDelta):
+                    _log_event(chat_id, "text_delta", text=event.text)
+                    accumulated += event.text
+
+                    now = time.monotonic()
+                    if now - last_edit >= config.EDIT_INTERVAL:
+                        display = accumulated[:MAX_MSG_LEN]
+                        await _edit_message(bot_msg, display)
+                        last_edit = now
+
+                        # Split if too long
+                        if len(accumulated) > MAX_MSG_LEN and msg_count < MAX_MESSAGES_PER_RESPONSE:
+                            await _edit_message(bot_msg, accumulated[:MAX_MSG_LEN])
+                            accumulated = accumulated[MAX_MSG_LEN:]
+                            bot_msg = await update.message.reply_text("...")
+                            msg_count += 1
+
+                elif isinstance(event, ToolUse):
+                    _log_event(chat_id, "tool_use", tool=event.tool, input=event.input)
+                    tool_detail = _format_tool_indicator(event.tool, event.input)
+                    tool_indicator = f"\n<blockquote>{tool_detail}</blockquote>\n"
+                    accumulated += tool_indicator
+                    now = time.monotonic()
+                    if now - last_edit >= config.EDIT_INTERVAL:
+                        await _edit_message(bot_msg, accumulated[:MAX_MSG_LEN])
+                        last_edit = now
+
+                elif isinstance(event, Result):
+                    # Handle session-not-found errors from CLI
+                    if event.is_error and any("no conversation found" in e.lower() for e in event.errors):
+                        if attempt < max_retries:
+                            await _edit_message(bot_msg, "Session not found, starting new...")
+                            session_retry = True
+                            break
+                        else:
+                            await _edit_message(bot_msg, "Error: Failed to start Claude session.")
+                            return
+
+                    if event.is_error:
+                        error_msg = "; ".join(event.errors) if event.errors else event.text or "Unknown error"
+                        await _edit_message(bot_msg, f"Error: {error_msg}")
+                        return
+
+                    # Use result text as final output if we have it
+                    if event.text and not accumulated.strip(".\n "):
+                        accumulated = event.text
+
+                    # Split remaining text into messages
+                    while len(accumulated) > MAX_MSG_LEN and msg_count < MAX_MESSAGES_PER_RESPONSE:
+                        await _edit_message(bot_msg, accumulated[:MAX_MSG_LEN])
+                        accumulated = accumulated[MAX_MSG_LEN:]
+                        bot_msg = await update.message.reply_text("...")
+                        msg_count += 1
+
+                    cost_usd = event.cost_usd
+                    if event.session_id:
+                        session_manager.update(chat_id, event.session_id)
+
+                    clean_response = re.sub(r"\n*<blockquote>.*?</blockquote>\n*", "", accumulated, flags=re.DOTALL).strip()
+                    _log_event(chat_id, "response",
+                               response=clean_response, cost_usd=cost_usd,
+                               usage=event.usage,
+                               session_id=event.session_id,
+                               subtype=event.subtype)
+                    footer = _format_footer(event.cost_usd)
+                    final = (accumulated + footer).strip() if footer else accumulated.strip()
+                    await _edit_message(bot_msg, final)
+
+                    if event.subtype == "error_max_turns":
+                        keyboard = InlineKeyboardMarkup([[
+                            InlineKeyboardButton("▶ 続行", callback_data=f"continue:{chat_id}"),
+                            InlineKeyboardButton("⏹ 中断", callback_data=f"stop:{chat_id}"),
+                        ]])
+                        await update.message.reply_text(
+                            "<i>ターン上限に達しました</i>",
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=keyboard,
+                        )
+
+                elif isinstance(event, Error):
+                    await _edit_message(bot_msg, f"Error: {event.message}")
+
+        except RuntimeError as e:
+            logger.error("Claude CLI error: %s", e)
+            await _edit_message(bot_msg, f"Error: {e}")
+            return
+        finally:
+            typing_stop.set()
+            typing_task.cancel()
+
+        if not session_retry:
+            return
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button presses."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+    action, _, cid = data.partition(":")
+    chat_id = int(cid) if cid.isdigit() else 0
+
+    user = query.from_user
+    if not user or user.id not in config.ALLOWED_USER_IDS:
+        return
+
+    await query.edit_message_text("<i>ターン上限に達しました</i>", parse_mode=ParseMode.HTML)
+
+    if action == "continue":
+        lock = _get_lock(chat_id)
+        if lock.locked():
+            await query.message.reply_text("Please wait for the current response to finish.")
+            return
+        async with lock:
+            await _process_message_from_callback(query, chat_id, "続けてください")
+    # "stop" — do nothing, just remove the buttons
+
+
+async def _process_message_from_callback(query, chat_id: int, prompt: str):
+    """Process a continuation from callback button (no update.message)."""
+    session_id, is_new = session_manager.get_or_create(chat_id)
+
     _log_event(chat_id, "request",
-               user_id=user.id if user else 0,
-               username=(user.username or user.full_name) if user else None,
+               user_id=query.from_user.id if query.from_user else 0,
+               username=(query.from_user.username or query.from_user.full_name) if query.from_user else None,
                prompt=prompt,
                session_id=str(session_id),
                is_new=is_new)
 
-    # Start typing indicator
     typing_stop = asyncio.Event()
-    typing_task = asyncio.create_task(_send_typing(chat_id, update.get_bot(), typing_stop))
+    typing_task = asyncio.create_task(_send_typing(chat_id, query.get_bot(), typing_stop))
 
-    bot_msg = await update.message.reply_text("...")
+    bot_msg = await query.message.reply_text("...")
     accumulated = ""
     last_edit = 0.0
     msg_count = 1
@@ -400,74 +545,65 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
             if isinstance(event, TextDelta):
                 _log_event(chat_id, "text_delta", text=event.text)
                 accumulated += event.text
-
                 now = time.monotonic()
                 if now - last_edit >= config.EDIT_INTERVAL:
-                    display = accumulated[:MAX_MSG_LEN]
-                    await _edit_message(bot_msg, display)
+                    await _edit_message(bot_msg, accumulated[:MAX_MSG_LEN])
                     last_edit = now
-
-                    # Split if too long
                     if len(accumulated) > MAX_MSG_LEN and msg_count < MAX_MESSAGES_PER_RESPONSE:
                         await _edit_message(bot_msg, accumulated[:MAX_MSG_LEN])
                         accumulated = accumulated[MAX_MSG_LEN:]
-                        bot_msg = await update.message.reply_text("...")
+                        bot_msg = await query.message.reply_text("...")
                         msg_count += 1
 
             elif isinstance(event, ToolUse):
                 _log_event(chat_id, "tool_use", tool=event.tool, input=event.input)
                 tool_detail = _format_tool_indicator(event.tool, event.input)
-                tool_indicator = f"\n<blockquote>{tool_detail}</blockquote>\n"
-                accumulated += tool_indicator
+                accumulated += f"\n<blockquote>{tool_detail}</blockquote>\n"
                 now = time.monotonic()
                 if now - last_edit >= config.EDIT_INTERVAL:
                     await _edit_message(bot_msg, accumulated[:MAX_MSG_LEN])
                     last_edit = now
 
             elif isinstance(event, Result):
-                # Handle session-not-found errors from CLI
                 if event.is_error and any("no conversation found" in e.lower() for e in event.errors):
                     raise SessionNotFoundError("; ".join(event.errors))
-
                 if event.is_error:
-                    error_msg = "; ".join(event.errors) if event.errors else event.text or "Unknown error"
-                    await _edit_message(bot_msg, f"Error: {error_msg}")
+                    await _edit_message(bot_msg, f"Error: {'; '.join(event.errors) or event.text or 'Unknown error'}")
                     return
-
-                # Use result text as final output if we have it
                 if event.text and not accumulated.strip(".\n "):
                     accumulated = event.text
-
-                # Split remaining text into messages
                 while len(accumulated) > MAX_MSG_LEN and msg_count < MAX_MESSAGES_PER_RESPONSE:
                     await _edit_message(bot_msg, accumulated[:MAX_MSG_LEN])
                     accumulated = accumulated[MAX_MSG_LEN:]
-                    bot_msg = await update.message.reply_text("...")
+                    bot_msg = await query.message.reply_text("...")
                     msg_count += 1
 
                 cost_usd = event.cost_usd
-                # Update session ID if CLI returned a different one
                 if event.session_id:
                     session_manager.update(chat_id, event.session_id)
-
                 clean_response = re.sub(r"\n*<blockquote>.*?</blockquote>\n*", "", accumulated, flags=re.DOTALL).strip()
-                _log_event(chat_id, "response",
-                           response=clean_response, cost_usd=cost_usd,
-                           usage=event.usage,
-                           session_id=event.session_id)
+                _log_event(chat_id, "response", response=clean_response, cost_usd=cost_usd,
+                           usage=event.usage, session_id=event.session_id, subtype=event.subtype)
                 footer = _format_footer(event.cost_usd)
                 final = (accumulated + footer).strip() if footer else accumulated.strip()
                 await _edit_message(bot_msg, final)
+
+                if event.subtype == "error_max_turns":
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("▶ 続行", callback_data=f"continue:{chat_id}"),
+                        InlineKeyboardButton("⏹ 中断", callback_data=f"stop:{chat_id}"),
+                    ]])
+                    await query.message.reply_text(
+                        "<i>ターン上限に達しました</i>",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=keyboard,
+                    )
 
             elif isinstance(event, Error):
                 await _edit_message(bot_msg, f"Error: {event.message}")
 
     except SessionNotFoundError:
-        if not retry:
-            await _edit_message(bot_msg, "Session not found, starting new...")
-            await _process_message(update, chat_id, prompt, retry=True)
-        else:
-            await _edit_message(bot_msg, "Error: Failed to start Claude session.")
+        await _edit_message(bot_msg, "Error: Session not found.")
     except RuntimeError as e:
         logger.error("Claude CLI error: %s", e)
         await _edit_message(bot_msg, f"Error: {e}")
@@ -486,6 +622,7 @@ def run():
     app = Application.builder().token(config.BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
