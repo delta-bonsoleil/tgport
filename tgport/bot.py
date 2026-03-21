@@ -133,6 +133,40 @@ def _log_event(chat_id: int, event_type: str, **fields):
         _write_log(log_path, line)
 
 
+def _format_tool_indicator(tool: str, input_data: dict | None) -> str:
+    """Format tool use indicator with brief description."""
+    if not input_data:
+        return f"[{tool}]"
+    if tool == "Read":
+        path = input_data.get("file_path", "")
+        short = path.split("/")[-1] if "/" in path else path
+        return f"[{tool}] {short}"
+    if tool == "Bash":
+        cmd = input_data.get("command", "")
+        return f"[{tool}] {cmd[:60]}"
+    if tool in ("Edit", "Write"):
+        path = input_data.get("file_path", "")
+        short = path.split("/")[-1] if "/" in path else path
+        return f"[{tool}] {short}"
+    if tool == "Glob":
+        return f"[{tool}] {input_data.get('pattern', '')}"
+    if tool == "Grep":
+        return f"[{tool}] {input_data.get('pattern', '')}"
+    if tool == "WebSearch":
+        return f"[{tool}] {input_data.get('query', '')[:60]}"
+    if tool == "WebFetch":
+        url = input_data.get("url", "")
+        prompt = input_data.get("prompt", "")
+        if prompt:
+            return f"[{tool}] {url}\n{prompt[:80]}"
+        return f"[{tool}] {url}"
+    if tool == "ToolSearch":
+        return f"[{tool}] {input_data.get('query', '')}"
+    # Fallback: show first value
+    first_val = next(iter(input_data.values()), "") if input_data else ""
+    return f"[{tool}] {str(first_val)[:60]}"
+
+
 def _format_footer(cost_usd: float) -> str:
     parts = []
     # Model & effort
@@ -382,7 +416,8 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
 
             elif isinstance(event, ToolUse):
                 _log_event(chat_id, "tool_use", tool=event.tool, input=event.input)
-                tool_indicator = f"\n\n<blockquote>[{event.tool}]</blockquote>\n"
+                tool_detail = _format_tool_indicator(event.tool, event.input)
+                tool_indicator = f"\n<blockquote>{tool_detail}</blockquote>\n"
                 accumulated += tool_indicator
                 now = time.monotonic()
                 if now - last_edit >= config.EDIT_INTERVAL:
@@ -415,7 +450,7 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
                 if event.session_id:
                     session_manager.update(chat_id, event.session_id)
 
-                clean_response = re.sub(r"\n*<blockquote>\[.*?\]</blockquote>\n*", "", accumulated).strip()
+                clean_response = re.sub(r"\n*<blockquote>.*?</blockquote>\n*", "", accumulated, flags=re.DOTALL).strip()
                 _log_event(chat_id, "response",
                            response=clean_response, cost_usd=cost_usd,
                            usage=event.usage,
