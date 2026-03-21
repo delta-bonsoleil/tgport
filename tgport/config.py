@@ -28,6 +28,21 @@ EDIT_INTERVAL: float = float(os.getenv("EDIT_INTERVAL", "1.5"))
 RESPONSE_TIMEOUT: int = int(os.getenv("RESPONSE_TIMEOUT", "300"))
 LOG_DIR: str = os.getenv("LOG_DIR", os.path.expanduser("~/workspace/projects/tgport/logs"))
 COST_DISPLAY: str = os.getenv("COST_DISPLAY", "dollar")  # none / dollar / yen
+_USD_TO_JPY_FILE: str = os.getenv("USD_TO_JPY_FILE", os.path.expanduser("~/workspace/config/usd_to_jpy.txt"))
+_USD_TO_JPY_DEFAULT: float = 158.0
+
+
+def get_usd_to_jpy() -> float:
+    """Read USD/JPY rate from file (re-read each call)."""
+    try:
+        with open(_USD_TO_JPY_FILE, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    return float(line)
+    except (FileNotFoundError, ValueError):
+        pass
+    return _USD_TO_JPY_DEFAULT
 CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "sonnet")  # e.g. sonnet, opus, haiku
 CLAUDE_EFFORT: str = os.getenv("CLAUDE_EFFORT", "low")  # low, medium, high, max
 LOG_RETENTION_DAYS: int = int(os.getenv("LOG_RETENTION_DAYS", "14"))

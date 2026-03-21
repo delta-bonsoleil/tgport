@@ -77,8 +77,14 @@ def _rotate_logs():
                 logger.error("Failed to rotate log %s: %s", fname, e)
 
 
+def _write_log(log_path: str, line: str):
+    """Synchronous log write (runs in thread pool)."""
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
 def _log_event(chat_id: int, event_type: str, **fields):
-    """Append an event entry to the JSONL log file."""
+    """Append an event entry to the JSONL log file without blocking the event loop."""
     os.makedirs(config.LOG_DIR, exist_ok=True)
     _rotate_logs()
     log_path = os.path.join(config.LOG_DIR, f"chat_{chat_id}.jsonl")
@@ -88,25 +94,31 @@ def _log_event(chat_id: int, event_type: str, **fields):
         "event": event_type,
         **fields,
     }
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
     try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception as e:
-        logger.error("Failed to write conversation log: %s", e)
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _write_log, log_path, line)
+    except RuntimeError:
+        # No running loop, write synchronously
+        _write_log(log_path, line)
 
 
-USD_TO_JPY = 158.0
-
-
-def _format_cost(cost_usd: float) -> str:
+def _format_footer(cost_usd: float) -> str:
+    parts = []
+    # Model & effort
+    model = config.CLAUDE_MODEL or "default"
+    effort = config.CLAUDE_EFFORT or "default"
+    parts.append(f"{model}/{effort}")
+    # Cost
     mode = config.COST_DISPLAY.lower()
-    if mode == "none":
-        return ""
     if mode == "yen":
-        yen = cost_usd * USD_TO_JPY
-        return f"\n\n<i>cost: ¥{yen:.2f}</i>"
-    # dollar (default)
-    return f"\n\n<i>cost: ${cost_usd:.4f}</i>"
+        yen = cost_usd * config.get_usd_to_jpy()
+        parts.append(f"¥{yen:.2f}")
+    elif mode != "none":
+        parts.append(f"${cost_usd:.4f}")
+    if not parts:
+        return ""
+    return f"\n\n<i>{' | '.join(parts)}</i>"
 
 
 def _get_lock(chat_id: int) -> asyncio.Lock:
@@ -370,7 +382,7 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
                 clean_response = re.sub(r"\n<i>\[.*?\]</i>", "", accumulated).strip()
                 _log_event(chat_id, "response",
                            response=clean_response, cost_usd=cost_usd)
-                footer = _format_cost(event.cost_usd)
+                footer = _format_footer(event.cost_usd)
                 final = (accumulated + footer).strip() if footer else accumulated.strip()
                 await _edit_message(bot_msg, final)
 
