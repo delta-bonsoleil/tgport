@@ -82,16 +82,16 @@ def _rotate_logs():
 _MASK_PATTERNS = [
     # Telegram bot tokens: 1234567890:AAHxx...
     (re.compile(r'\b\d{8,10}:[A-Za-z0-9_-]{30,}\b'), '***BOT_TOKEN***'),
-    # Generic API keys / secrets (long hex or base64 strings after key-like words)
-    (re.compile(r'(?i)(api[_-]?key|secret|token|password|passwd|authorization)\s*[=:]\s*\S+'), r'\1=***MASKED***'),
-    # Auth header tokens
-    (re.compile(r'(?i)(' + 'Bear' + r'er\s+)\S+'), r'\1***MASKED***'),
-    # AWS-style keys
-    (re.compile(r'(?:AKIA|ABIA|ACCA)[A-Z0-9]{16}'), '***AWS_KEY***'),
     # Anthropic API keys
     (re.compile(r'sk-ant-[a-zA-Z0-9_-]{20,}'), '***ANTHROPIC_KEY***'),
     # Google / Gemini API keys
     (re.compile(r'AIzaSy[A-Za-z0-9_-]{33}'), '***GEMINI_KEY***'),
+    # AWS-style keys
+    (re.compile(r'(?:AKIA|ABIA|ACCA)[A-Z0-9]{16}'), '***AWS_KEY***'),
+    # Auth header tokens (具体的なパターンを先に)
+    (re.compile(r'(?i)(Bearer\s+)\S+'), r'\1***MASKED***'),
+    # Generic API keys / secrets
+    (re.compile(r'(?i)(api[_-]?key|secret|token|password|passwd)\s*[=:]\s*\S+'), r'\1=***MASKED***'),
 ]
 
 
