@@ -48,6 +48,7 @@ def _build_command(
     prompt: str,
     session_id: uuid.UUID,
     is_new_session: bool,
+    agent: str = "",
 ) -> list[str]:
     cmd = [
         "claude",
@@ -64,6 +65,12 @@ def _build_command(
         cmd += ["--effort", config.CLAUDE_EFFORT]
     if config.CLAUDE_MAX_TURNS:
         cmd += ["--max-turns", str(config.CLAUDE_MAX_TURNS)]
+    if config.CLAUDE_TOOLS:
+        cmd += ["--tools", config.CLAUDE_TOOLS]
+    if config.CLAUDE_DISABLE_SLASH:
+        cmd.append("--disable-slash-commands")
+    if agent:
+        cmd += ["--agent", agent]
     if is_new_session:
         cmd += ["--session-id", str(session_id)]
     else:
@@ -114,8 +121,9 @@ async def stream_claude(
     prompt: str,
     session_id: uuid.UUID,
     is_new_session: bool,
+    agent: str = "",
 ) -> AsyncGenerator[StreamEvent, None]:
-    cmd = _build_command(prompt, session_id, is_new_session)
+    cmd = _build_command(prompt, session_id, is_new_session, agent=agent)
 
     process = await asyncio.create_subprocess_exec(
         *cmd,

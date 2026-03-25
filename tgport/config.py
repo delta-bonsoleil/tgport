@@ -1,3 +1,4 @@
+import json
 import os
 from dotenv import load_dotenv
 
@@ -11,7 +12,23 @@ def _require(key: str) -> str:
     return val
 
 
-BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
+# マルチBot設定
+# BOTS='[{"bot_token": "111:AAA...", "agent": "teddy"}, {"bot_token": "222:BBB...", "agent": ""}]'
+# 未設定の場合は TELEGRAM_BOT_TOKEN + CLAUDE_AGENT にフォールバック
+def _load_bots() -> list[dict]:
+    raw = os.getenv("BOTS")
+    if raw:
+        try:
+            bots = json.loads(raw)
+            if isinstance(bots, list) and all("token" in b for b in bots):
+                return bots
+        except json.JSONDecodeError:
+            pass
+    return [{"token": _require("TELEGRAM_BOT_TOKEN"), "agent": os.getenv("CLAUDE_AGENT", "")}]
+
+
+BOTS: list[dict] = _load_bots()
+BOT_TOKEN: str = BOTS[0]["token"]  # 後方互換（既存コードとの互換性のため）
 
 ALLOWED_USER_IDS: set[int] = {
     int(uid.strip())
@@ -27,22 +44,8 @@ DOWNLOAD_DIR: str = os.getenv("DOWNLOAD_DIR", os.path.expanduser("~/workspace/as
 EDIT_INTERVAL: float = float(os.getenv("EDIT_INTERVAL", "1.5"))
 RESPONSE_TIMEOUT: int = int(os.getenv("RESPONSE_TIMEOUT", "300"))
 LOG_DIR: str = os.getenv("LOG_DIR", os.path.expanduser("~/workspace/projects/tgport/logs"))
-COST_DISPLAY: str = os.getenv("COST_DISPLAY", "dollar")  # none / dollar / yen
-_USD_TO_JPY_FILE: str = os.getenv("USD_TO_JPY_FILE", os.path.expanduser("~/workspace/config/usd_to_jpy.txt"))
-_USD_TO_JPY_DEFAULT: float = 158.0
-
-
-def get_usd_to_jpy() -> float:
-    """Read USD/JPY rate from file (re-read each call)."""
-    try:
-        with open(_USD_TO_JPY_FILE, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    return float(line)
-    except (FileNotFoundError, ValueError):
-        pass
-    return _USD_TO_JPY_DEFAULT
 CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "sonnet")  # e.g. sonnet, opus, haiku
 CLAUDE_EFFORT: str = os.getenv("CLAUDE_EFFORT", "low")  # low, medium, high, max
+CLAUDE_TOOLS: str = os.getenv("CLAUDE_TOOLS", "")  # e.g. "Bash,Read,Edit,Write,Glob,Grep" (empty = all)
+CLAUDE_DISABLE_SLASH: bool = os.getenv("CLAUDE_DISABLE_SLASH", "").lower() in ("1", "true", "yes")
 LOG_RETENTION_DAYS: int = int(os.getenv("LOG_RETENTION_DAYS", "14"))

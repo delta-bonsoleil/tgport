@@ -25,7 +25,6 @@ from .session import SessionManager
 
 logger = logging.getLogger(__name__)
 
-session_manager = SessionManager()
 _chat_locks: dict[int, asyncio.Lock] = {}
 
 MAX_MSG_LEN = 4000
@@ -237,27 +236,31 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@restricted
-async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    session_manager.reset(chat_id)
-    await update.message.reply_text("New conversation started.")
+def make_cmd_new(sm: SessionManager):
+    @restricted
+    async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        sm.reset(chat_id)
+        await update.message.reply_text("New conversation started.")
+    return cmd_new
 
 
-@restricted
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    prompt = update.message.text
-    if not prompt:
-        return
+def make_handle_message(sm: SessionManager, agent: str = ""):
+    @restricted
+    async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        prompt = update.message.text
+        if not prompt:
+            return
 
-    lock = _get_lock(chat_id)
-    if lock.locked():
-        await update.message.reply_text("Please wait for the current response to finish.")
-        return
+        lock = _get_lock(chat_id)
+        if lock.locked():
+            await update.message.reply_text("Please wait for the current response to finish.")
+            return
 
-    async with lock:
-        await _process_message(update, chat_id, prompt)
+        async with lock:
+            await _process_message(update, chat_id, prompt, sm, agent)
+    return handle_message
 
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".txt", ".md", ".pdf"}
@@ -285,42 +288,45 @@ def _safe_filepath(download_dir: str, filename: str) -> str:
     return filepath
 
 
-@restricted
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    caption = update.message.caption or "この画像を確認してください。"
+def make_handle_photo(sm: SessionManager, agent: str = ""):
+    @restricted
+    async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        caption = update.message.caption or "この画像を確認してください。"
 
-    lock = _get_lock(chat_id)
-    if lock.locked():
-        await update.message.reply_text("Please wait for the current response to finish.")
-        return
+        lock = _get_lock(chat_id)
+        if lock.locked():
+            await update.message.reply_text("Please wait for the current response to finish.")
+            return
 
-    if not update.message.photo:
-        return
-    photo = update.message.photo[-1]
+        if not update.message.photo:
+            return
+        photo = update.message.photo[-1]
 
-    if photo.file_size and photo.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text(f"ファイルが大きすぎます（上限: {MAX_FILE_SIZE // 1024 // 1024}MB）")
-        return
+        if photo.file_size and photo.file_size > MAX_FILE_SIZE:
+            await update.message.reply_text(f"ファイルが大きすぎます（上限: {MAX_FILE_SIZE // 1024 // 1024}MB）")
+            return
 
-    file = await context.bot.get_file(photo.file_id)
+        file = await context.bot.get_file(photo.file_id)
 
-    download_dir = _get_download_dir(".jpg")
-    os.makedirs(download_dir, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    filename = f"{ts}_{photo.file_unique_id}.jpg"
-    filepath = _safe_filepath(download_dir, filename)
-    await file.download_to_drive(filepath)
+        download_dir = _get_download_dir(".jpg")
+        os.makedirs(download_dir, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        filename = f"{ts}_{photo.file_unique_id}.jpg"
+        filepath = _safe_filepath(download_dir, filename)
+        await file.download_to_drive(filepath)
 
-    prompt = f"{caption}\n\n[画像ファイル: {filepath}]"
-    logger.info("Photo saved: %s", filepath)
+        prompt = f"{caption}\n\n[画像ファイル: {filepath}]"
+        logger.info("Photo saved: %s", filepath)
 
-    async with lock:
-        await _process_message(update, chat_id, prompt)
+        async with lock:
+            await _process_message(update, chat_id, prompt, sm, agent)
+    return handle_photo
 
 
-@restricted
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def make_handle_document(sm: SessionManager, agent: str = ""):
+  @restricted
+  async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     caption = update.message.caption or "このファイルを確認してください。"
     doc = update.message.document
@@ -360,7 +366,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("Document saved: %s", filepath)
 
     async with lock:
-        await _process_message(update, chat_id, prompt)
+        await _process_message(update, chat_id, prompt, sm, agent)
+  return handle_document
 
 
 async def _send_typing(chat_id: int, bot, stop_event: asyncio.Event):
@@ -378,10 +385,10 @@ async def _send_typing(chat_id: int, bot, stop_event: asyncio.Event):
         logger.warning("Typing indicator error: %s", e)
 
 
-async def _process_message(update: Update, chat_id: int, prompt: str):
+async def _process_message(update: Update, chat_id: int, prompt: str, sm: SessionManager, agent: str = ""):
     max_retries = 1
     for attempt in range(max_retries + 1):
-        session_id, is_new = session_manager.get_or_create(chat_id)
+        session_id, is_new = sm.get_or_create(chat_id)
         if attempt > 0:
             is_new = True
 
@@ -421,7 +428,7 @@ async def _process_message(update: Update, chat_id: int, prompt: str):
             return bot_msg
 
         try:
-            async for event in stream_claude(prompt, session_id, is_new):
+            async for event in stream_claude(prompt, session_id, is_new, agent=agent):
                 if isinstance(event, TextDelta):
                     _log_event(chat_id, "text_delta", text=event.text)
                     accumulated += html.escape(event.text)
@@ -487,7 +494,7 @@ async def _process_message(update: Update, chat_id: int, prompt: str):
 
                     cost_usd = event.cost_usd
                     if event.session_id:
-                        session_manager.update(chat_id, event.session_id)
+                        sm.update(chat_id, event.session_id)
 
                     clean_response = re.sub(r"\n*<blockquote>.*?</blockquote>\n*", "", accumulated, flags=re.DOTALL).strip()
                     _log_event(chat_id, "response",
@@ -526,33 +533,35 @@ async def _process_message(update: Update, chat_id: int, prompt: str):
             return
 
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle inline keyboard button presses."""
-    query = update.callback_query
-    await query.answer()
+def make_handle_callback(sm: SessionManager, agent: str = ""):
+    async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle inline keyboard button presses."""
+        query = update.callback_query
+        await query.answer()
 
-    action = (query.data or "").strip()
-    chat_id = query.message.chat_id
+        action = (query.data or "").strip()
+        chat_id = query.message.chat_id
 
-    user = query.from_user
-    if not user or user.id not in config.ALLOWED_USER_IDS:
-        return
-
-    await query.edit_message_text("<i>ターン上限に達しました</i>", parse_mode=ParseMode.HTML)
-
-    if action == "continue":
-        lock = _get_lock(chat_id)
-        if lock.locked():
-            await query.message.reply_text("Please wait for the current response to finish.")
+        user = query.from_user
+        if not user or user.id not in config.ALLOWED_USER_IDS:
             return
-        async with lock:
-            await _process_message_from_callback(query, chat_id, "続けてください")
-    # "stop" — do nothing, just remove the buttons
+
+        await query.edit_message_text("<i>ターン上限に達しました</i>", parse_mode=ParseMode.HTML)
+
+        if action == "continue":
+            lock = _get_lock(chat_id)
+            if lock.locked():
+                await query.message.reply_text("Please wait for the current response to finish.")
+                return
+            async with lock:
+                await _process_message_from_callback(query, chat_id, "続けてください", sm, agent)
+        # "stop" — do nothing, just remove the buttons
+    return handle_callback
 
 
-async def _process_message_from_callback(query, chat_id: int, prompt: str):
+async def _process_message_from_callback(query, chat_id: int, prompt: str, sm: SessionManager, agent: str = ""):
     """Process a continuation from callback button (no update.message)."""
-    session_id, is_new = session_manager.get_or_create(chat_id)
+    session_id, is_new = sm.get_or_create(chat_id)
 
     _log_event(chat_id, "request",
                user_id=query.from_user.id if query.from_user else 0,
@@ -578,7 +587,7 @@ async def _process_message_from_callback(query, chat_id: int, prompt: str):
         return bot_msg
 
     try:
-        async for event in stream_claude(prompt, session_id, is_new):
+        async for event in stream_claude(prompt, session_id, is_new, agent=agent):
             if isinstance(event, TextDelta):
                 _log_event(chat_id, "text_delta", text=event.text)
                 accumulated += html.escape(event.text)
@@ -626,7 +635,7 @@ async def _process_message_from_callback(query, chat_id: int, prompt: str):
 
                 cost_usd = event.cost_usd
                 if event.session_id:
-                    session_manager.update(chat_id, event.session_id)
+                    sm.update(chat_id, event.session_id)
                 clean_response = re.sub(r"\n*<blockquote>.*?</blockquote>\n*", "", accumulated, flags=re.DOTALL).strip()
                 _log_event(chat_id, "response", response=clean_response, cost_usd=cost_usd,
                            usage=event.usage, session_id=event.session_id, subtype=event.subtype)
@@ -665,15 +674,36 @@ def run():
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    app = Application.builder().token(config.BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("new", cmd_new))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-
     if config.CLAUDE_SKIP_PERMISSIONS:
         logger.warning("DANGEROUS: --dangerously-skip-permissions is enabled!")
-    logger.info("Bot started. Allowed users: %s", config.ALLOWED_USER_IDS)
-    app.run_polling()
+
+    apps = []
+    for bot_cfg in config.BOTS:
+        tg_tok = bot_cfg.get("token", "")
+        agent = bot_cfg.get("agent", "")
+        sm = SessionManager(tg_tok)
+
+        app = Application.builder().token(tg_tok).build()
+        app.add_handler(CommandHandler("start", cmd_start))
+        app.add_handler(CommandHandler("new", make_cmd_new(sm)))
+        app.add_handler(CallbackQueryHandler(make_handle_callback(sm, agent)))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, make_handle_message(sm, agent)))
+        app.add_handler(MessageHandler(filters.PHOTO, make_handle_photo(sm, agent)))
+        app.add_handler(MessageHandler(filters.Document.ALL, make_handle_document(sm, agent)))
+        apps.append(app)
+        logger.info("Bot configured: agent=%r, allowed_users=%s", agent or "default", config.ALLOWED_USER_IDS)
+
+    if len(apps) == 1:
+        apps[0].run_polling()
+    else:
+        async def _run_all():
+            async with asyncio.TaskGroup() as tg:
+                for app in apps:
+                    await app.initialize()
+                    await app.start()
+                    tg.create_task(app.updater.start_polling())
+            for app in apps:
+                await app.stop()
+                await app.shutdown()
+
+        asyncio.run(_run_all())
