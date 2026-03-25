@@ -197,10 +197,11 @@ def _format_footer(usage: dict | None = None) -> str:
     return f"\n\n<i>{' | '.join(parts)}</i>"
 
 
-def _get_lock(chat_id: int) -> asyncio.Lock:
-    if chat_id not in _chat_locks:
-        _chat_locks[chat_id] = asyncio.Lock()
-    return _chat_locks[chat_id]
+def _get_lock(agent: str, chat_id: int) -> asyncio.Lock:
+    key = (agent, chat_id)
+    if key not in _chat_locks:
+        _chat_locks[key] = asyncio.Lock()
+    return _chat_locks[key]
 
 
 def restricted(func):
@@ -253,9 +254,9 @@ def make_handle_message(sm: SessionManager, agent: str = ""):
         if not prompt:
             return
 
-        lock = _get_lock(chat_id)
+        lock = _get_lock(agent, chat_id)
         if lock.locked():
-            await update.message.reply_text("Please wait for the current response to finish.")
+            await update.message.reply_text("⏳ 前のメッセージを処理中です。完了してから送ってください。")
             return
 
         async with lock:
@@ -294,9 +295,9 @@ def make_handle_photo(sm: SessionManager, agent: str = ""):
         chat_id = update.effective_chat.id
         caption = update.message.caption or "この画像を確認してください。"
 
-        lock = _get_lock(chat_id)
+        lock = _get_lock(agent, chat_id)
         if lock.locked():
-            await update.message.reply_text("Please wait for the current response to finish.")
+            await update.message.reply_text("⏳ 前のメッセージを処理中です。完了してから送ってください。")
             return
 
         if not update.message.photo:
@@ -316,11 +317,11 @@ def make_handle_photo(sm: SessionManager, agent: str = ""):
         filepath = _safe_filepath(download_dir, filename)
         await file.download_to_drive(filepath)
 
-        prompt = f"{caption}\n\n[画像ファイル: {filepath}]"
+        prompt = caption
         logger.info("Photo saved: %s", filepath)
 
         async with lock:
-            await _process_message(update, chat_id, prompt, sm, agent)
+            await _process_message(update, chat_id, prompt, sm, agent, image_path=filepath)
     return handle_photo
 
 
@@ -346,9 +347,9 @@ def make_handle_document(sm: SessionManager, agent: str = ""):
         await update.message.reply_text(f"ファイルが大きすぎます（上限: {MAX_FILE_SIZE // 1024 // 1024}MB）")
         return
 
-    lock = _get_lock(chat_id)
+    lock = _get_lock(agent, chat_id)
     if lock.locked():
-        await update.message.reply_text("Please wait for the current response to finish.")
+        await update.message.reply_text("⏳ 前のメッセージを処理中です。完了してから送ってください。")
         return
 
     file = await context.bot.get_file(doc.file_id)
@@ -385,7 +386,7 @@ async def _send_typing(chat_id: int, bot, stop_event: asyncio.Event):
         logger.warning("Typing indicator error: %s", e)
 
 
-async def _process_message(update: Update, chat_id: int, prompt: str, sm: SessionManager, agent: str = ""):
+async def _process_message(update: Update, chat_id: int, prompt: str, sm: SessionManager, agent: str = "", image_path: str | None = None):
     max_retries = 1
     for attempt in range(max_retries + 1):
         session_id, is_new = sm.get_or_create(chat_id)
@@ -428,7 +429,7 @@ async def _process_message(update: Update, chat_id: int, prompt: str, sm: Sessio
             return bot_msg
 
         try:
-            async for event in stream_claude(prompt, session_id, is_new, agent=agent):
+            async for event in stream_claude(prompt, session_id, is_new, agent=agent, image_path=image_path):
                 if isinstance(event, TextDelta):
                     _log_event(chat_id, "text_delta", text=event.text)
                     accumulated += html.escape(event.text)
@@ -549,9 +550,9 @@ def make_handle_callback(sm: SessionManager, agent: str = ""):
         await query.edit_message_text("<i>ターン上限に達しました</i>", parse_mode=ParseMode.HTML)
 
         if action == "continue":
-            lock = _get_lock(chat_id)
+            lock = _get_lock(agent, chat_id)
             if lock.locked():
-                await query.message.reply_text("Please wait for the current response to finish.")
+                await query.message.reply_text("⏳ 前のメッセージを処理中です。完了してから送ってください。")
                 return
             async with lock:
                 await _process_message_from_callback(query, chat_id, "続けてください", sm, agent)
@@ -670,7 +671,7 @@ async def _process_message_from_callback(query, chat_id: int, prompt: str, sm: S
 def run():
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        level=logging.INFO,
+        level=logging.DEBUG,
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -696,13 +697,28 @@ def run():
     if len(apps) == 1:
         apps[0].run_polling()
     else:
+        import signal
+
         async def _run_all():
-            async with asyncio.TaskGroup() as tg:
-                for app in apps:
-                    await app.initialize()
-                    await app.start()
-                    tg.create_task(app.updater.start_polling())
+            stop_event = asyncio.Event()
+
+            def _handle_signal():
+                stop_event.set()
+
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, _handle_signal)
+
             for app in apps:
+                await app.initialize()
+                await app.start()
+                await app.updater.start_polling()
+
+            logger.info("All %d bots started.", len(apps))
+            await stop_event.wait()
+
+            for app in apps:
+                await app.updater.stop()
                 await app.stop()
                 await app.shutdown()
 

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import uuid
@@ -49,6 +50,7 @@ def _build_command(
     session_id: uuid.UUID,
     is_new_session: bool,
     agent: str = "",
+    has_image: bool = False,
 ) -> list[str]:
     cmd = [
         "claude",
@@ -75,8 +77,30 @@ def _build_command(
         cmd += ["--session-id", str(session_id)]
     else:
         cmd += ["--resume", str(session_id)]
-    cmd += ["--", prompt]
+    if has_image:
+        cmd += ["--input-format", "stream-json"]
+    else:
+        cmd += ["--", prompt]
     return cmd
+
+
+def _build_image_stdin(prompt: str, image_path: str) -> bytes:
+    """Build a stream-json stdin payload with text + base64 image."""
+    with open(image_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+    ext = image_path.rsplit(".", 1)[-1].lower()
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
+    msg = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image", "source": {"type": "base64", "media_type": mime, "data": img_b64}},
+            ],
+        },
+    }
+    return (json.dumps(msg) + "\n").encode()
 
 
 def _parse_event(data: dict) -> list[StreamEvent]:
@@ -122,15 +146,24 @@ async def stream_claude(
     session_id: uuid.UUID,
     is_new_session: bool,
     agent: str = "",
+    image_path: str | None = None,
 ) -> AsyncGenerator[StreamEvent, None]:
-    cmd = _build_command(prompt, session_id, is_new_session, agent=agent)
+    has_image = image_path is not None
+    cmd = _build_command(prompt, session_id, is_new_session, agent=agent, has_image=has_image)
+    stdin_data = _build_image_stdin(prompt, image_path) if has_image else None
 
     process = await asyncio.create_subprocess_exec(
         *cmd,
+        stdin=asyncio.subprocess.PIPE if has_image else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=config.CLAUDE_WORK_DIR,
     )
+
+    if has_image and stdin_data:
+        assert process.stdin
+        process.stdin.write(stdin_data)
+        process.stdin.close()
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + config.RESPONSE_TIMEOUT
