@@ -48,8 +48,7 @@ cp .env.example .env
 | `RESPONSE_TIMEOUT` | No | `300` | レスポンス待ちの最大時間（秒） |
 | `LOG_DIR` | No | `~/workspace/projects/tgport/logs` | 会話ログの保存先ディレクトリ |
 | `LOG_RETENTION_DAYS` | No | `14` | ログバックアップの保持日数 |
-| `COST_DISPLAY` | No | `dollar` | コスト表示形式（`none` / `dollar` / `yen`） |
-| `USD_TO_JPY_FILE` | No | `~/workspace/config/usd_to_jpy.txt` | 円表示時の為替レートファイル |
+| `COST_DISPLAY` | No | `dollar` | コスト表示形式（`none` / `dollar`） |
 | `CLAUDE_MODEL` | No | `sonnet` | 使用モデル（`sonnet` / `opus` / `haiku` またはフルネーム） |
 | `CLAUDE_EFFORT` | No | `low` | 推論レベル（`low` / `medium` / `high` / `max`） |
 
@@ -72,18 +71,6 @@ cp .env.example .env
 
 - 日付が変わると、前日のログは `chat_{ID}_bk-YYYYMMDD.jsonl` に自動ローテーション
 - `LOG_RETENTION_DAYS` 日以上前のバックアップは自動削除
-
-### 為替レート
-
-`COST_DISPLAY=yen` の場合、`USD_TO_JPY_FILE`（デフォルト: `~/workspace/config/usd_to_jpy.txt`）からレートを読み込みます。リクエスト毎に読み込むため、ファイルを更新すれば再起動不要で反映されます。
-
-ファイル形式:
-```
-# USD/JPY レート (2026-03-21更新)
-158.0
-```
-
-ボット（Claude）に「為替レート更新して」と伝えると、Webで最新レートを調べてこのファイルを更新します。
 
 ## セキュリティ
 
