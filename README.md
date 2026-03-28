@@ -72,6 +72,39 @@ cp .env.example .env
 - 日付が変わると、前日のログは `chat_{ID}_bk-YYYYMMDD.jsonl` に自動ローテーション
 - `LOG_RETENTION_DAYS` 日以上前のバックアップは自動削除
 
+## systemdサービスとして常駐させる
+
+`/etc/systemd/system/tgport.service` を作成：
+
+```ini
+[Unit]
+Description=tgport - Telegram bot wrapper for Claude CLI
+After=network.target
+
+[Service]
+Type=simple
+User=<ユーザー名>
+WorkingDirectory=/path/to/tgport
+Environment=PATH=/home/<ユーザー>/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/path/to/tgport/.env
+ExecStart=/path/to/tgport/.venv/bin/python -m tgport
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+有効化・起動：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable tgport
+sudo systemctl start tgport
+```
+
+> **注意**: `WorkingDirectory` はtgportのディレクトリに合わせて変更すること。`sessions.json` や `.env` はこのディレクトリを基準に読み込まれます。
+
 ## セキュリティ
 
 - `ALLOWED_USER_IDS` に登録されたユーザーのみ操作可能。未許可のアクセスはログに記録されます。
