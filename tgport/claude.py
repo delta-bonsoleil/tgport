@@ -53,7 +53,7 @@ def _build_command(
     has_image: bool = False,
 ) -> list[str]:
     cmd = [
-        "claude",
+        config.CLAUDE_BIN,
         "-p",
         "--output-format", "stream-json",
         "--verbose",

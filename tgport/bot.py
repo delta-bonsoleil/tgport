@@ -682,7 +682,7 @@ def run():
     for bot_cfg in config.BOTS:
         tg_tok = bot_cfg.get("token", "")
         agent = bot_cfg.get("agent", "")
-        sm = SessionManager(tg_tok)
+        sm = SessionManager(config.SESSION_DIR, token=tg_tok)
 
         app = Application.builder().token(tg_tok).build()
         app.add_handler(CommandHandler("start", cmd_start))

@@ -49,3 +49,5 @@ CLAUDE_EFFORT: str = os.getenv("CLAUDE_EFFORT", "low")  # low, medium, high, max
 CLAUDE_TOOLS: str = os.getenv("CLAUDE_TOOLS", "")  # e.g. "Bash,Read,Edit,Write,Glob,Grep" (empty = all)
 CLAUDE_DISABLE_SLASH: bool = os.getenv("CLAUDE_DISABLE_SLASH", "").lower() in ("1", "true", "yes")
 LOG_RETENTION_DAYS: int = int(os.getenv("LOG_RETENTION_DAYS", "14"))
+SESSION_DIR: str = os.getenv("SESSION_DIR", os.path.expanduser("~/workspace/services/tgport/sessions"))
+CLAUDE_BIN: str = os.getenv("CLAUDE_BIN", "claude")
