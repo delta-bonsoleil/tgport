@@ -9,3 +9,4 @@ dist/
 *.log
 logs/
 sessions.json
+sessions/
