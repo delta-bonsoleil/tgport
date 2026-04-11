@@ -11,9 +11,10 @@ def _token_hash(token: str) -> str:
 class SessionManager:
     """Maps (token_hash, chat_id) to Claude session UUIDs with file persistence."""
 
-    def __init__(self, path: str | None = None, token: str = ""):
-        self._path = path or os.path.expanduser("~/workspace/projects/tgport/sessions.json")
-        self._token_hash = _token_hash(token) if token else ""
+    def __init__(self, session_dir: str, token: str = ""):
+        self._token_hash = _token_hash(token) if token else "default"
+        os.makedirs(session_dir, exist_ok=True)
+        self._path = os.path.join(session_dir, f"{self._token_hash}.json")
         self._sessions: dict[str, uuid.UUID] = {}
         self._load()
 
